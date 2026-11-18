@@ -1,0 +1,220 @@
+Use this master specification followed by the 5 sequential phase prompts in GitHub Copilot Chat (Agent / Edit Mode). Feeding it phase-by-phase prevents context truncation while ensuring every file imports cleanly from the previous step.
+Step 0: Create .github/copilot-instructions.md (Optional but Recommended)
+Save this block in .github/copilot-instructions.md in your workspace root so Copilot maintains your hardware and domain constraints across every prompt:
+# Project: Offline AI Contract-to-Invoice Verification Engine
+
+## Core Rules & Hardware Constraints
+- **100% Offline Execution**: Zero external cloud API calls. Use local `ollama` (`http://localhost:11434`) for LLM inference and local CPU libraries (`pymupdf`, `pdfplumber`, `rapidocr-onnxruntime`) for document parsing.
+- **Hardware Profile**: NVIDIA RTX 4050 (6GB VRAM) + Intel Core i7. Keep all PDF/OCR parsing strictly on CPU so all 6GB VRAM is reserved for `qwen2.5:7b-instruct` (or `llama3.1:8b`).
+- **Neuro-Symbolic Separation**: NEVER use the LLM for math, tax calculations, or pass/fail decisions. The LLM only extracts unstructured PDF text/tables into strict Pydantic JSON schemas. Pure Python (`engine/validator.py`) performs all deterministic validation and arithmetic.
+- **Persistence**: Local `sqlite3` database (`forensic_contracts.db`).
+- **UI**: Streamlit (`app.py`) with 2 main operational tabs + 1 ledger/exhaustion view.
+
+Phase 1 Prompt: Project Scaffolding, Config & Strict Pydantic Schemas
+Copy and paste this into GitHub Copilot first:
+@workspace We are building a 100% offline AI Contract-to-Invoice Verification Tool in Python. Let's execute **Phase 1: Configuration & Pydantic Data Schemas**.
+
+Create the following files with complete, production-ready code (no placeholders):
+
+1. `requirements.txt`:
+   Include `streamlit`, `pydantic>=2.0`, `requests`, `pymupdf`, `pdfplumber`, `rapidocr-onnxruntime`, `pandas`, `Pillow`.
+
+2. `config.py`:
+   - `OLLAMA_BASE_URL = "http://localhost:11434"`
+   - `OLLAMA_MODEL = "qwen2.5:7b-instruct"` (with fallback option configurable in UI)
+   - `DB_PATH = "forensic_contracts.db"`
+   - `RELEVANT_CONTRACT_KEYWORDS` list for commercial page filtering: `["annexure", "schedule", "fee", "charge", "milestone", "payment", "gst", "tax", "retention", "advance", "compensation", "tower", "rate", "price", "amendment", "boq"]`.
+
+3. `extraction/schemas.py`:
+   Define strict Pydantic v2 models with clear `Field(description=...)` annotations so Ollama's structured output grammar extracts accurately:
+   - `GSTTreatment(str, Enum)`: `"INCLUSIVE"`, `"EXCLUSIVE"`, `"EXEMPT"`
+   - `AdvanceRecoveryRule(str, Enum)`: `"EQUAL_INSTALLMENTS"`, `"PERCENTAGE_PER_INVOICE"`, `"LUMP_SUM"`, `"NONE"`
+   - `ContractMilestone(BaseModel)`:
+     - `milestone_code`: str (e.g., "M1", "M2", "M3", "RET")
+     - `milestone_name`: str (e.g., "Foundation", "Erection", "Stringing", "Retention Release")
+     - `stage_pct`: float (e.g., 35.0, 30.0, 30.0, 5.0)
+     - `unit_rate`: float (e.g., 44625.0)
+     - `unit_type`: str (e.g., "per tower", "per location", "lumpsum")
+     - `amendment_no`: int = 0
+     - `source_clause_ref`: str
+   - `ReimbursableCap(BaseModel)`:
+     - `category_name`: str (e.g., "Farmer Land Compensation", "Tree and Crop Compensation")
+     - `max_cap_per_unit`: float (e.g., 40000.0, 20000.0)
+     - `allowed_at_foundation_pct`: float (e.g., 50.0 for farmer compensation, 100.0 if as per actual)
+     - `allowed_at_stringing_pct`: float (e.g., 50.0)
+     - `is_actuals_based`: bool
+     - `source_clause_ref`: str
+   - `ContractSchema(BaseModel)`:
+     - `contract_id`: str
+     - `project_name`: str
+     - `client_name`: str
+     - `vendor_name`: str
+     - `total_scope_units`: int (e.g., 275)
+     - `scope_tolerance_pct`: float (e.g., 10.0)
+     - `total_contract_value`: float
+     - `gst_treatment`: GSTTreatment
+     - `standard_gst_rate_pct`: float (default 18.0)
+     - `advance_amount`: float (e.g., 1500000.0)
+     - `advance_recovery_rule`: AdvanceRecoveryRule
+     - `advance_recovery_installments`: int (e.g., 2 for "first two invoices in equal amounts")
+     - `advance_recovery_pct`: float (e.g., 10.0 if percentage-based)
+     - `retention_pct`: float (e.g., 5.0)
+     - `retention_release_condition`: str (e.g., "6 months post COD")
+     - `milestones`: List[ContractMilestone]
+     - `reimbursable_caps`: List[ReimbursableCap]
+   - `InvoiceLineItem(BaseModel)`:
+     - `line_no`: int
+     - `description`: str
+     - `matched_category_type`: Literal["MILESTONE", "REIMBURSABLE_FARMER", "REIMBURSABLE_CROP", "OTHER"]
+     - `milestone_code_hint`: Optional[str] (e.g., "M1", "M2", "M3")
+     - `stage_claimed`: Optional[str] (e.g., "Foundation", "Erection", "Stringing")
+     - `quantity_billed`: float
+     - `unit_rate_billed`: float
+     - `base_amount_billed`: float
+   - `InvoiceSchema(BaseModel)`:
+     - `invoice_number`: str
+     - `invoice_date`: str
+     - `vendor_name`: str
+     - `contract_reference`: str
+     - `line_items`: List[InvoiceLineItem]
+     - `subtotal_base_amount`: float
+     - `cgst_pct`: float
+     - `cgst_amount`: float
+     - `sgst_pct`: float
+     - `sgst_amount`: float
+     - `igst_pct`: float
+     - `igst_amount`: float
+     - `total_tax_amount`: float
+     - `gross_amount_with_tax`: float
+     - `advance_adjusted`: float
+     - `retention_deducted`: float
+     - `net_payable_claimed`: float
+
+Phase 2 Prompt: CPU-Bound PDF/Table Parser & Local SQLite Manager
+Once Phase 1 is generated, paste this second prompt:
+@workspace Great. Now let's build **Phase 2: Local Document Ingestion (`ingestion/pdf_parser.py`) and SQLite Persistence (`database/db_manager.py`)**.
+
+Create these two files with complete implementations:
+
+1. `ingestion/pdf_parser.py`:
+   - Must run 100% on CPU to preserve GPU VRAM for Ollama.
+   - Implement `extract_pdf_content(pdf_bytes: bytes, is_contract: bool = True) -> dict`:
+     - Use `fitz` (PyMuPDF) to extract text per page and detect if a page is scanned (if text length < 50 chars, render the page image and run `rapidocr_onnxruntime` as a CPU OCR fallback).
+     - Use `pdfplumber` on each relevant page to extract tables and convert every table into clean Markdown pipe tables (`| Col1 | Col2 |`) so row-column alignment is preserved for the LLM.
+     - Implement a smart page router for contracts: if `is_contract=True` and the PDF has > 8 pages, score each page using `RELEVANT_CONTRACT_KEYWORDS` from `config.py` plus pages containing tables or currency symbols (`₹`, `Rs`, `INR`, `%`). Always keep page 1-2 (header/parties) + top-scoring commercial/annexure pages so the context stays under 6,000 tokens.
+     - Return `{"full_markdown": str, "page_count": int, "selected_pages": list[int], "tables_found": int}`.
+
+2. `database/db_manager.py`:
+   - Manage a local SQLite database (`DB_PATH` from `config.py`).
+   - Tables required:
+     - `contracts`: `contract_id PRIMARY KEY`, `project_name`, `vendor_name`, `gst_treatment`, `total_scope_units`, `scope_tolerance_pct`, `total_contract_value`, `advance_amount`, `advance_recovery_rule`, `advance_recovery_installments`, `advance_recovery_pct`, `retention_pct`, `raw_json`, `created_at`
+     - `contract_milestones`: `id`, `contract_id`, `milestone_code`, `milestone_name`, `stage_pct`, `unit_rate`, `unit_type`, `amendment_no`, `source_clause_ref`
+     - `contract_caps`: `id`, `contract_id`, `category_name`, `max_cap_per_unit`, `allowed_at_foundation_pct`, `allowed_at_stringing_pct`, `is_actuals_based`, `source_clause_ref`
+     - `invoices_ledger`: `invoice_id PRIMARY KEY`, `contract_id`, `invoice_number`, `invoice_date`, `sequence_no`, `claimed_gross`, `claimed_net`, `verified_gross`, `verified_tax`, `verified_advance_deduction`, `verified_retention_deduction`, `verified_net_payable`, `verdict`, `units_billed_json`, `audit_report_json`, `is_approved_for_ledger`, `created_at`
+   - Implement clean CRUD methods:
+     - `init_db()`
+     - `save_contract(contract: ContractSchema)` (supports upserting / applying amendment overrides)
+     - `get_contract(contract_id: str) -> ContractSchema`
+     - `list_contracts() -> list[dict]`
+     - `get_contract_exhaustion_summary(contract_id: str) -> dict` (calculates cumulative approved invoices count, total paid to date, cumulative advance recovered so far, cumulative units billed per milestone, and remaining contract value/scope)
+     - `save_invoice_audit(...)`
+
+Phase 3 Prompt: Local Ollama Structured Extractor (GPU-Bound)
+Once Phase 2 is complete, paste this third prompt:
+@workspace Now let's build **Phase 3: Local Ollama Structured Extraction (`extraction/llm_extractor.py`)**.
+
+Create `extraction/llm_extractor.py` with complete code:
+1. Connect to local Ollama via `POST {OLLAMA_BASE_URL}/api/chat` with `stream=False`, `options={"temperature": 0.0, "num_ctx": 8192}`, and `format=Schema.model_json_schema()` to enforce token-level JSON grammar compliance.
+2. Implement `extract_contract_from_markdown(markdown_text: str, model_name: str = OLLAMA_MODEL) -> ContractSchema`:
+   - Write a domain-specific system prompt instructing the model to extract Right-of-Way (RoW) / infrastructure contract commercial terms accurately:
+     - Extract every milestone in `Annexure 2` / Schedule of Rates (e.g., Milestone 1 Foundation 35%, Milestone 2 Erection 30%, Milestone 3 Stringing 30%, Retention 5%).
+     - Extract pass-through reimbursable ceilings (e.g., Farmer compensation max ₹40,000/tower split 50% at foundation and 50% at stringing; Tree/Crop compensation max ₹20,000/tower as per actuals).
+     - Carefully determine `gst_treatment`: if the contract states prices are "inclusive of GST/taxes", set `"INCLUSIVE"`; if "exclusive of GST" or "GST extra as applicable", set `"EXCLUSIVE"`.
+     - Extract advance payment amount (e.g., ₹15,00,000) and recovery logic (e.g., adjusted equally in the first 2 invoices -> `EQUAL_INSTALLMENTS`, `advance_recovery_installments=2`).
+   - Validate the returned JSON using `ContractSchema.model_validate_json()`.
+3. Implement `extract_invoice_from_markdown(markdown_text: str, contract: ContractSchema, model_name: str = OLLAMA_MODEL) -> InvoiceSchema`:
+   - Pass the list of valid contract milestone codes and names in the system prompt so the LLM accurately maps each invoice line item to `milestone_code_hint` (e.g., mapping "Milestone-1 (35%) - Foundation of Tower" to `"M1"` and `matched_category_type="MILESTONE"`).
+   - Extract all tax lines (CGST, SGST, IGST), advance adjustments, retention deductions, and net payable claimed.
+   - Validate via `InvoiceSchema.model_validate_json()`.
+4. Include a helper `check_ollama_status() -> tuple[bool, list[str]]` that checks if `localhost:11434` is reachable and returns available local models.
+
+Phase 4 Prompt: The 5-Gate Deterministic Verification Engine
+Once Phase 3 is done, paste this fourth prompt:
+@workspace Now let's build **Phase 4: The Deterministic Rule & Math Verification Engine (`engine/validator.py`)**.
+
+Create `engine/validator.py` using pure Python arithmetic (zero LLM calls). Define a `ValidationResult` Pydantic model containing:
+- `verdict`: Literal["MATCHES (APPROVE)", "MISMATCH (REJECT)"]
+- `red_flags`: list[dict] (each with `severity`: "CRITICAL" | "WARNING", `gate`: str, `line_ref`: str, `description`: str, `contract_clause`: str, `financial_impact`: float)
+- `line_reconciliation`: list[dict] (side-by-side per line: Description, Qty Claimed, Rate Claimed, Rate Allowed, Base Claimed, Base Verified, Variance, Status)
+- `summary_comparison`: dict comparing Claimed vs. Verified for: `subtotal_base`, `total_tax`, `gross_total`, `advance_deduction`, `retention_deduction`, `net_amount_payable`, and `total_overcharge_prevented`.
+
+Implement `verify_invoice_against_contract(invoice: InvoiceSchema, contract: ContractSchema, ledger_summary: dict) -> ValidationResult` with these exact **5 Verification Gates**:
+
+1. **Gate 1: Milestone Rate & Amendment Verification (Catches Test Case 1 - Unexplained Rate Jump)**:
+   - Match each `MILESTONE` invoice line item to the active contract milestone (using highest `amendment_no` for that milestone code, or matching by name/stage).
+   - Compare `unit_rate_billed` vs `contract_milestone.unit_rate`.
+   - If `unit_rate_billed > contract_milestone.unit_rate` (e.g., billed ₹84,625 vs contracted ₹44,625), raise a `CRITICAL` Red Flag detailing the exact per-unit rate jump (+₹40,000/unit) and total line overcharge, and compute `verified_base = quantity_billed * contract_milestone.unit_rate`.
+   - Also verify line arithmetic: `quantity_billed * unit_rate_billed == base_amount_billed`.
+
+2. **Gate 2: Reimbursable Caps & Stage-Split Enforcement**:
+   - For `REIMBURSABLE_FARMER` or `REIMBURSABLE_CROP` lines, check against `contract.reimbursable_caps`.
+   - Enforce per-unit ceiling (e.g., if Tree/Crop compensation is billed at ₹35,000/tower against a ₹20,000 cap, flag `CRITICAL` and cap verified rate at ₹20,000).
+   - Enforce stage-gate split (e.g., if Farmer Compensation max is ₹40,000 with 50% allowed at Foundation, max allowed rate at Foundation is ₹20,000/tower).
+
+3. **Gate 3: GST Inclusivity vs. Exclusivity Check (Catches Test Case 2 - GST Double-Dipping)**:
+   - Check `contract.gst_treatment`.
+   - If `contract.gst_treatment == "INCLUSIVE"` and the invoice adds CGST/SGST/IGST (`invoice.total_tax_amount > 0`), raise a `CRITICAL` Red Flag: *"Contract rates are INCLUSIVE of GST, but vendor charged extra GST on top of contracted rates."* Set `verified_tax = 0.0` (so the 18% overcharge is completely stripped from Verified Payable).
+   - If `contract.gst_treatment == "EXCLUSIVE"`, recalculate expected tax (`verified_subtotal_base * (contract.standard_gst_rate_pct / 100.0)`) and flag any tax rate discrepancy.
+
+4. **Gate 4: Advance Recovery & Retention Deduction Math Check**:
+   - Determine remaining unrecovered advance from `ledger_summary["advance_recovered_to_date"]`.
+   - Calculate required advance deduction on this invoice based on `contract.advance_recovery_rule`:
+     - If `EQUAL_INSTALLMENTS` (e.g., ₹15,00,000 across first 2 invoices = ₹7,50,000 per invoice), check if `invoice.advance_adjusted` matches the required installment (up to remaining unrecovered advance).
+     - If `PERCENTAGE_PER_INVOICE`, compute `verified_subtotal_base * (contract.advance_recovery_pct / 100.0)`.
+   - Flag a `CRITICAL` mismatch if the vendor under-deducted the required advance recovery.
+   - Calculate expected retention: `verified_retention = verified_gross * (contract.retention_pct / 100.0)` (or on base as per standard practice—check if vendor calculated 5% on gross or base and verify math).
+
+5. **Gate 5: Cumulative Contract Scope & Exhaustion Check**:
+   - Check if `cumulative_units_billed + current_units_billed` for any milestone exceeds `contract.total_scope_units * (1 + contract.scope_tolerance_pct / 100.0)` (e.g., 275 towers + 10% = 302.5 towers max).
+   - Check if cumulative verified spend exceeds `contract.total_contract_value`.
+
+Compute final `verified_net_payable = verified_gross - verified_advance_deduction - verified_retention_deduction`. Set `verdict = "MISMATCH (REJECT)"` if any `CRITICAL` red flag exists or if `abs(invoice.net_payable_claimed - verified_net_payable) > 1.0`.
+
+Phase 5 Prompt: Streamlit Local Verification UI & Built-in Demo Seeder
+Finally, paste this fifth prompt to build the UI and test cases:
+@workspace Now let's build **Phase 5: The Streamlit Local UI (`app.py`) and Built-in Demo Test Seeder (`demo_seeder.py`)**.
+
+1. Create `demo_seeder.py`:
+   - Provide a button/function `seed_demo_cases()` that pre-loads the exact 2 benchmark contracts and invoices into SQLite/session state so we can test the engine immediately even before uploading PDFs, while also supporting live PDF uploads:
+     - **Case 1 (Fatehgarh-III RoW Contract - Ravji Company)**:
+       - Contract: 275 towers (±10%), GST `EXCLUSIVE` (18%), Advance ₹15,00,000 (recovered equally in first 2 invoices), Retention 5%. Milestones: M1 Foundation (35%) = ₹44,625; M2 Erection (30%) = ₹38,250; M3 Stringing (30%) = ₹38,250; Retention (5%) = ₹6,375. Caps: Farmer Comp Max ₹40,000 (50% Foundation / 50% Stringing), Tree/Crop Comp Max ₹20,000.
+       - Invoice `1-FTL/ROW/RAVJ/002`: Bills 6 locations for M1 Foundation at **₹84,625/location** (Base ₹5,07,750 + 9% CGST ₹45,697.50 + 9% SGST ₹45,697.50 = Gross ₹5,99,145; Advance Adjusted = ₹0; Retention 5% = ₹29,957.25; Net Claimed = ₹5,69,187.75).
+     - **Case 2 (The 99-Lakh GST Inclusive Double-Dip Case)**:
+       - Contract: Agreed rate is **INCLUSIVE of GST** (e.g., ₹84,00,000 inclusive of GST), Advance 10% deduction per invoice, Retention 5%.
+       - Invoice: Vendor treats ₹84,00,000 as base excluding GST and adds 18% GST (+₹15,12,000 = ₹99,12,000) and fails to deduct the 10% advance.
+
+2. Create `app.py` (Streamlit UI):
+   - Configure wide layout (`st.set_page_config(page_title="Offline AI Contract & Invoice Auditor", layout="wide")`).
+   - **Sidebar**:
+     - Offline Status Badge (`100% Local Execution | Zero External APIs`).
+     - Ollama connection check & local model selector dropdown (`qwen2.5:7b-instruct`, `llama3.1:8b`, etc.).
+     - `"Load Benchmark Test Cases (Case 1 & Case 2)"` button for instant demo verification.
+   - **Tab 1: Contract Onboarding & Master Rate Card (Replaces Manual Excel Entry)**:
+     - Upload Signed Contract / Amendment PDF -> runs CPU parser -> runs Ollama extractor -> displays extracted metadata, payment rules (GST Inclusive/Exclusive, Advance Rule, Retention %), Milestone Rate Card table, and Reimbursable Caps table inside editable `st.data_editor` grids so the user can review/edit and click **"Save Contract to Local DB"**.
+   - **Tab 2: Automated Invoice Verification & Payable Calculator**:
+     - Select an active Contract from SQLite dropdown.
+     - Upload Vendor Invoice PDF (or select a pre-loaded test invoice).
+     - Run the 5-Gate Deterministic Verification Engine.
+     - Display a prominent green **MATCHES (APPROVE)** or red **MISMATCH (REJECT)** banner.
+     - Show 4 KPI metric cards: `Vendor Claimed Net Payable`, `AI Verified Net Payable`, `Overcharge / Leakage Blocked (₹)`, and `Red Flags Detected`.
+     - Render the **Red Flags Audit Trail** with severity badges, exact contract clause references, and rupee impact.
+     - Render the **Line-by-Line & Tax/Advance/Retention Reconciliation Table** (`Vendor Claimed` vs `Contract Verified` vs `Variance`).
+     - Provide an **"Approve Verified Amount & Commit to Contract Ledger"** button.
+   - **Tab 3: Contract Exhaustion & Payment Ledger**:
+     - Show progress bars and tables for Total Contract Value vs. Cumulative Paid vs. Remaining Balance, Advance Recovered vs. Pending Advance, and Tower Scope Exhaustion per milestone (e.g., X / 275 towers billed).
+
+Quick Setup Before Running Copilot
+Make sure Ollama is running locally with your model pulled so Phase 3 & 5 work out of the box:
+ollama pull qwen2.5:7b-instruct
+
+Would you like me to also give you a quick script to generate synthetic PDF files for Case 1 (Ravji Company Contract + Invoice 002) and Case 2 (the 99-Lakh GST Inclusive Contract + Invoice) so you have actual PDF files to drag-and-drop during your demo if Pritish sends his files late?
